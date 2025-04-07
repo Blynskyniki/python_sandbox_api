@@ -13,3 +13,4 @@ yarn-error.log*
 /temp/*
 Search_bot/.env
 /Search_bot/1.txt
+.env
