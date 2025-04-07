@@ -1,6 +1,8 @@
 # Python
+import ast
 import asyncio
 import base64
+import importlib.util
 import json
 import os
 import platform
@@ -14,23 +16,27 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# Загрузка .env
 load_dotenv()
 
+# Параметры из окружения
 CPU_LIMIT = int(os.getenv("CPU_LIMIT_SECONDS", 2))
 MEMORY_LIMIT = int(os.getenv("MEMORY_LIMIT_MB", 64)) * 1024 * 1024
 TIMEOUT = int(os.getenv("EXEC_TIMEOUT_SECONDS", 3))
-
 AUTH_USER = os.getenv("BASIC_AUTH_USER")
 AUTH_PASS = os.getenv("BASIC_AUTH_PASS")
 
+# Инициализация FastAPI
 app = FastAPI()
 
 
+# Модель запроса
 class CodeRequest(BaseModel):
     code: str
     args: List
 
 
+# Middleware авторизации
 @app.middleware("http")
 async def basic_auth_middleware(request: Request, call_next):
     if not AUTH_USER or not AUTH_PASS:
@@ -41,8 +47,7 @@ async def basic_auth_middleware(request: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     try:
-        b64_encoded = auth.split(" ")[1]
-        decoded = base64.b64decode(b64_encoded).decode()
+        decoded = base64.b64decode(auth.split(" ")[1]).decode()
         username, password = decoded.split(":", 1)
         if username != AUTH_USER or password != AUTH_PASS:
             raise ValueError("Invalid credentials")
@@ -52,6 +57,7 @@ async def basic_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# Ограничение ресурсов (Linux only)
 def set_limits():
     if platform.system() != "Linux":
         return
@@ -65,6 +71,43 @@ def set_limits():
         raise
 
 
+# Извлечение импортов из кода
+def extract_imports(code: str) -> list[str]:
+    try:
+        tree = ast.parse(code)
+        modules = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    modules.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    modules.add(node.module.split(".")[0])
+        return list(modules)
+    except Exception:
+        return []
+
+
+# Установка недостающих библиотек
+def ensure_modules_installed(modules: list[str]):
+    missing = []
+    for name in modules:
+        if importlib.util.find_spec(name) is None:
+            missing.append(name)
+    if not missing:
+        return
+    try:
+        subprocess.run(
+            ["pip", "install", "--no-cache-dir"] + missing,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Failed to install modules: {e.stderr.decode().strip()}")
+
+
+# Запуск кода в subprocess
 def sync_run(wrapped_code: str) -> dict:
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".py", delete=False) as tmp:
         tmp.write(wrapped_code)
@@ -97,18 +140,29 @@ def sync_run(wrapped_code: str) -> dict:
         os.unlink(tmp_path)
 
 
+# Основная точка входа
 @app.post("/run")
 async def run_code(payload: CodeRequest):
-    wrapped_code = f"""{payload.code}
+    try:
+        modules = extract_imports(payload.code)
+        await asyncio.get_running_loop().run_in_executor(
+            None, ensure_modules_installed, modules
+        )
+
+        wrapped_code = f"""{payload.code}
 
 args = {json.dumps(payload.args)}
 result = run(*args)
 print(result)
 """
-    result = await asyncio.get_running_loop().run_in_executor(
-        None, sync_run, wrapped_code
-    )
+        result = await asyncio.get_running_loop().run_in_executor(
+            None, sync_run, wrapped_code
+        )
 
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
