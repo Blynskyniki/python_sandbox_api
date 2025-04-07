@@ -105,6 +105,8 @@ def ensure_modules_installed(modules: list[str]):
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to install modules: {e.stderr.decode().strip()}")
+    except subprocess.SubprocessError as e:
+        raise RuntimeError(f"Subprocess error: {e}")
 
 
 # Запуск кода в subprocess
@@ -121,8 +123,8 @@ def sync_run(wrapped_code: str) -> dict:
             "stderr": subprocess.PIPE,
             "timeout": TIMEOUT,
         }
-        if platform.system() == "Linux":
-            run_args["preexec_fn"] = set_limits
+        # if platform.system() == "Linux":
+        #     run_args["preexec_fn"] = set_limits
 
         result = subprocess.run(**run_args)
         return {
