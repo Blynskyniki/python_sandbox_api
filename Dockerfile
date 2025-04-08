@@ -1,16 +1,11 @@
-# Используем минимальный официальный образ Python
-FROM python:3.11-slim
+FROM python:3.11
 
-# Установка зависимостей системы (для работы resource и subprocess)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
+RUN apt update && apt install -y build-essential gcc libatlas-base-dev libopenblas-dev liblapack-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --upgrade pip setuptools wheel numpy pandas scipy
 # Установка рабочей директории
 WORKDIR /app
 
-RUN pip install numpy pandas
 # Копируем зависимости и код
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
