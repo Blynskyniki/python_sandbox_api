@@ -1,6 +1,6 @@
 FROM python:3.11
 
-RUN apt update && apt install -y build-essential gcc libatlas-base-dev libopenblas-dev liblapack-dev \
+RUN apt update && apt install -y build-essential gcc libatlas-base-dev libopenblas-dev liblapack-dev nano \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --upgrade pip setuptools wheel numpy pandas scipy
 # Установка рабочей директории

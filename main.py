@@ -174,7 +174,7 @@ async def run_code(payload: CodeRequest):
     logger.info("Received code execution request")
     try:
         modules = extract_imports(payload.code)
-        ensure_modules_installed(modules)
+        # ensure_modules_installed(modules)
 
         wrapped_code = f"""{payload.code}
 
