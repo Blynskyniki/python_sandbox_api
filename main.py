@@ -10,6 +10,7 @@ import platform
 import resource
 import subprocess
 import tempfile
+from asyncio import Queue, Future
 from typing import List
 
 from dotenv import load_dotenv
@@ -28,7 +29,6 @@ logger = logging.getLogger(__name__)
 # Загрузка .env
 load_dotenv()
 
-# Параметры из окружения
 CPU_LIMIT = int(os.getenv("CPU_LIMIT_SECONDS", 2))
 MEMORY_LIMIT = int(os.getenv("MEMORY_LIMIT_MB", 64)) * 1024 * 1024
 TIMEOUT = int(os.getenv("EXEC_TIMEOUT_SECONDS", 3))
@@ -36,6 +36,7 @@ AUTH_USER = os.getenv("BASIC_AUTH_USER")
 AUTH_PASS = os.getenv("BASIC_AUTH_PASS")
 
 app = FastAPI()
+task_queue: Queue[tuple["CodeRequest", Future]] = Queue()
 
 
 class CodeRequest(BaseModel):
@@ -80,16 +81,12 @@ def set_limits():
                 resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
                 logger.info(f"RLIMIT_AS set to {MEMORY_LIMIT // (1024 * 1024)} MB")
             elif system == "Darwin":
-                logger.warning(
-                    "RLIMIT_AS is not supported on macOS — skipping memory limit"
-                )
+                logger.warning("RLIMIT_AS not supported on macOS")
         else:
             logger.info("RLIMIT_AS disabled (value=0)")
 
-    except ValueError as ve:
-        logger.error(f"Invalid resource limit value: {ve}")
     except Exception as e:
-        logger.exception(f"set_limits failed: {e}")
+        logger.exception("set_limits failed")
         raise
 
 
@@ -149,7 +146,9 @@ def sync_run(wrapped_code: str) -> dict:
             "stderr": subprocess.PIPE,
             "timeout": TIMEOUT,
         }
-        if platform.system() == "Linux":
+        if platform.system() in ("Linux", "Darwin") and (
+            CPU_LIMIT > 0 or MEMORY_LIMIT > 0
+        ):
             run_args["preexec_fn"] = set_limits
 
         result = subprocess.run(**run_args)
@@ -173,30 +172,53 @@ def sync_run(wrapped_code: str) -> dict:
         logger.debug(f"Deleted temp file {tmp_path}")
 
 
-@app.post("/run")
-async def run_code(payload: CodeRequest):
-    logger.info("Received code execution request")
-    try:
-        modules = extract_imports(payload.code)
-        ensure_modules_installed(modules)
+async def worker():
+    while True:
+        payload, future = await task_queue.get()
+        try:
+            modules = extract_imports(payload.code)
+            ensure_modules_installed(modules)
 
-        wrapped_code = f"""{payload.code}
+            wrapped_code = f"""{payload.code}
 
 args = {json.dumps(payload.args)}
 result = run(*args)
 print(result)
 """
-        result = await asyncio.get_running_loop().run_in_executor(
-            None, sync_run, wrapped_code
-        )
-        logger.info(f"{result}")
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, sync_run, wrapped_code
+            )
+            future.set_result(result)
+        except Exception as e:
+            logger.exception("Worker exception")
+            future.set_exception(e)
+        finally:
+            task_queue.task_done()
+
+
+@app.on_event("startup")
+async def startup():
+    for _ in range(5):
+        asyncio.create_task(worker())
+
+
+@app.post("/run")
+async def run_code(payload: CodeRequest):
+    logger.info("Received code execution request")
+    future: Future = asyncio.get_running_loop().create_future()
+    await task_queue.put((payload, future))
+
+    try:
+        result = await asyncio.wait_for(future, timeout=TIMEOUT + 2)
 
         if "error" in result:
             logger.error(f"Execution error: {result['error']}")
             raise HTTPException(status_code=400, detail=result["error"])
 
         return result
-
+    except asyncio.TimeoutError:
+        logger.warning("Queue execution timeout")
+        raise HTTPException(status_code=504, detail="Queue execution timeout")
     except Exception as e:
-        logger.exception("Unhandled exception during /run")
+        logger.exception("Unhandled exception in /run")
         raise HTTPException(status_code=500, detail=str(e))
