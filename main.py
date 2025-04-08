@@ -66,13 +66,26 @@ async def basic_auth_middleware(request: Request, call_next):
 
 
 def set_limits():
-    if platform.system() != "Linux":
-        return
+    system = platform.system()
+
     try:
+        # Ограничение CPU времени
         resource.setrlimit(resource.RLIMIT_CPU, (CPU_LIMIT, CPU_LIMIT))
-        resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
+        logger.info(f"RLIMIT_CPU set to {CPU_LIMIT}s")
+
+        # Память
+        if system == "Linux":
+            resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
+            logger.info(f"RLIMIT_AS set to {MEMORY_LIMIT // (1024 * 1024)} MB")
+        elif system == "Darwin":
+            logger.warning(
+                "RLIMIT_AS is not supported on macOS — skipping memory limit"
+            )
+
+    except ValueError as ve:
+        logger.error(f"Invalid resource limit value: {ve}")
     except Exception as e:
-        logger.error(f"set_limits failed: {e}")
+        logger.exception(f"set_limits failed: {e}")
         raise
 
 
@@ -161,9 +174,7 @@ async def run_code(payload: CodeRequest):
     logger.info("Received code execution request")
     try:
         modules = extract_imports(payload.code)
-        await asyncio.get_running_loop().run_in_executor(
-            None, ensure_modules_installed, modules
-        )
+        ensure_modules_installed(modules)
 
         wrapped_code = f"""{payload.code}
 
