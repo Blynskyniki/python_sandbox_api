@@ -185,6 +185,7 @@ print(result)
         result = await asyncio.get_running_loop().run_in_executor(
             None, sync_run, wrapped_code
         )
+        logger.info(f"{result}")
 
         if "error" in result:
             logger.error(f"Execution error: {result['error']}")
