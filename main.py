@@ -69,18 +69,22 @@ def set_limits():
     system = platform.system()
 
     try:
-        # Ограничение CPU времени
-        resource.setrlimit(resource.RLIMIT_CPU, (CPU_LIMIT, CPU_LIMIT))
-        logger.info(f"RLIMIT_CPU set to {CPU_LIMIT}s")
+        if CPU_LIMIT > 0:
+            resource.setrlimit(resource.RLIMIT_CPU, (CPU_LIMIT, CPU_LIMIT))
+            logger.info(f"RLIMIT_CPU set to {CPU_LIMIT}s")
+        else:
+            logger.info("RLIMIT_CPU disabled (value=0)")
 
-        # Память
-        if system == "Linux":
-            resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
-            logger.info(f"RLIMIT_AS set to {MEMORY_LIMIT // (1024 * 1024)} MB")
-        elif system == "Darwin":
-            logger.warning(
-                "RLIMIT_AS is not supported on macOS — skipping memory limit"
-            )
+        if MEMORY_LIMIT > 0:
+            if system == "Linux":
+                resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
+                logger.info(f"RLIMIT_AS set to {MEMORY_LIMIT // (1024 * 1024)} MB")
+            elif system == "Darwin":
+                logger.warning(
+                    "RLIMIT_AS is not supported on macOS — skipping memory limit"
+                )
+        else:
+            logger.info("RLIMIT_AS disabled (value=0)")
 
     except ValueError as ve:
         logger.error(f"Invalid resource limit value: {ve}")
