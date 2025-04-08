@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
 # Установка рабочей директории
 WORKDIR /app
 
+RUN pip install numpy pandas
 # Копируем зависимости и код
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

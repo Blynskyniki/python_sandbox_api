@@ -4,6 +4,7 @@ import asyncio
 import base64
 import importlib.util
 import json
+import logging
 import os
 import platform
 import resource
@@ -16,6 +17,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+# Настройка логгирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger(__name__)
+
 # Загрузка .env
 load_dotenv()
 
@@ -26,17 +35,14 @@ TIMEOUT = int(os.getenv("EXEC_TIMEOUT_SECONDS", 3))
 AUTH_USER = os.getenv("BASIC_AUTH_USER")
 AUTH_PASS = os.getenv("BASIC_AUTH_PASS")
 
-# Инициализация FastAPI
 app = FastAPI()
 
 
-# Модель запроса
 class CodeRequest(BaseModel):
     code: str
     args: List
 
 
-# Middleware авторизации
 @app.middleware("http")
 async def basic_auth_middleware(request: Request, call_next):
     if not AUTH_USER or not AUTH_PASS:
@@ -50,14 +56,15 @@ async def basic_auth_middleware(request: Request, call_next):
         decoded = base64.b64decode(auth.split(" ")[1]).decode()
         username, password = decoded.split(":", 1)
         if username != AUTH_USER or password != AUTH_PASS:
+            logger.warning("Unauthorized access attempt")
             raise ValueError("Invalid credentials")
-    except Exception:
+    except Exception as e:
+        logger.error(f"Auth error: {e}")
         return JSONResponse(status_code=401, content={"detail": "Invalid basic auth"})
 
     return await call_next(request)
 
 
-# Ограничение ресурсов (Linux only)
 def set_limits():
     if platform.system() != "Linux":
         return
@@ -65,13 +72,10 @@ def set_limits():
         resource.setrlimit(resource.RLIMIT_CPU, (CPU_LIMIT, CPU_LIMIT))
         resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
     except Exception as e:
-        import sys
-
-        print(f"[sandbox] set_limits failed: {e}", file=sys.stderr)
+        logger.error(f"set_limits failed: {e}")
         raise
 
 
-# Извлечение импортов из кода
 def extract_imports(code: str) -> list[str]:
     try:
         tree = ast.parse(code)
@@ -83,12 +87,13 @@ def extract_imports(code: str) -> list[str]:
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     modules.add(node.module.split(".")[0])
+        logger.info(f"Extracted imports: {modules}")
         return list(modules)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to extract imports: {e}")
         return []
 
 
-# Установка недостающих библиотек
 def ensure_modules_installed(modules: list[str]):
     missing = []
     for name in modules:
@@ -96,6 +101,7 @@ def ensure_modules_installed(modules: list[str]):
             missing.append(name)
     if not missing:
         return
+    logger.info(f"Installing missing modules: {missing}")
     try:
         subprocess.run(
             ["pip", "install", "--no-cache-dir"] + missing,
@@ -103,19 +109,22 @@ def ensure_modules_installed(modules: list[str]):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        logger.info("Modules installed successfully")
     except subprocess.CalledProcessError as e:
+        logger.error(f"Pip install error: {e.stderr.decode().strip()}")
         raise RuntimeError(f"Failed to install modules: {e.stderr.decode().strip()}")
     except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error during pip install: {e}")
         raise RuntimeError(f"Subprocess error: {e}")
 
 
-# Запуск кода в subprocess
 def sync_run(wrapped_code: str) -> dict:
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".py", delete=False) as tmp:
         tmp.write(wrapped_code)
         tmp.flush()
         tmp_path = tmp.name
 
+    logger.info(f"Executing code at {tmp_path}")
     try:
         run_args = {
             "args": ["python3", tmp_path],
@@ -123,28 +132,33 @@ def sync_run(wrapped_code: str) -> dict:
             "stderr": subprocess.PIPE,
             "timeout": TIMEOUT,
         }
-        # if platform.system() == "Linux":
-        #     run_args["preexec_fn"] = set_limits
+        if platform.system() == "Linux":
+            run_args["preexec_fn"] = set_limits
 
         result = subprocess.run(**run_args)
+        logger.info(f"Execution finished with code {result.returncode}")
         return {
             "stdout": result.stdout.decode().strip(),
             "stderr": result.stderr.decode().strip(),
             "exit_code": result.returncode,
         }
     except subprocess.TimeoutExpired:
+        logger.warning("Code execution timed out")
         return {"error": "Execution timed out"}
     except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error: {e}")
         return {"error": f"Subprocess error: {e}"}
     except Exception as e:
+        logger.error(f"Unknown execution error: {e}")
         return {"error": f"Unknown error: {e}"}
     finally:
         os.unlink(tmp_path)
+        logger.debug(f"Deleted temp file {tmp_path}")
 
 
-# Основная точка входа
 @app.post("/run")
 async def run_code(payload: CodeRequest):
+    logger.info("Received code execution request")
     try:
         modules = extract_imports(payload.code)
         await asyncio.get_running_loop().run_in_executor(
@@ -162,9 +176,11 @@ print(result)
         )
 
         if "error" in result:
+            logger.error(f"Execution error: {result['error']}")
             raise HTTPException(status_code=400, detail=result["error"])
 
         return result
 
     except Exception as e:
+        logger.exception("Unhandled exception during /run")
         raise HTTPException(status_code=500, detail=str(e))
